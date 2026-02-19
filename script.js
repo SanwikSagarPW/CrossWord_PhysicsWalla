@@ -1,4 +1,15 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // ============================================
+    // ANALYTICS SETUP
+    // ============================================
+    const analytics = new AnalyticsManager();
+    analytics.initialize('crossword_puzzle', 'session_' + Date.now());
+    
+    let levelStartTime = 0;
+    let currentLevelId = null;
+    let checkAttempts = 0;
+    let submitAttempts = 0;
+
     // DOM Elements
     const gridElement = document.getElementById('crossword-grid');
     const acrossCluesElement = document.getElementById('across-clues');
@@ -64,6 +75,22 @@ document.addEventListener('DOMContentLoaded', () => {
             renderClues(clues.across, acrossCluesElement, 'across');
             renderClues(clues.down, downCluesElement, 'down');
             startTimer();
+            
+            // ============================================
+            // ANALYTICS: Track Level Start
+            // ============================================
+            currentLevelId = 'level_' + metadata.title.toLowerCase().replace(/\s+/g, '_');
+            analytics.startLevel(currentLevelId);
+            levelStartTime = Date.now();
+            checkAttempts = 0;
+            submitAttempts = 0;
+            
+            // Track initial metrics
+            analytics.addRawMetric('puzzle_title', metadata.title);
+            analytics.addRawMetric('puzzle_size', `${rows}x${cols}`);
+            analytics.addRawMetric('total_clues', clues.across.length + clues.down.length);
+            analytics.addRawMetric('across_clues', clues.across.length);
+            analytics.addRawMetric('down_clues', clues.down.length);
         } catch (error) {
             console.error("CRITICAL ERROR building puzzle:", error);
             gridElement.innerHTML = `<p style="color: var(--error-color);">A critical error occurred while building the puzzle.</p>`;
@@ -99,6 +126,16 @@ document.addEventListener('DOMContentLoaded', () => {
         document.querySelectorAll('.cell-input').forEach(input => { input.readOnly = true; });
         checkButton.disabled = true;
         submitButton.disabled = true;
+        
+        // ============================================
+        // ANALYTICS: Track Time's Up (Failed)
+        // ============================================
+        const timeTaken = GAME_DURATION * 1000; // Full time elapsed
+        analytics.addRawMetric('end_reason', 'time_up');
+        analytics.addRawMetric('time_remaining', 0);
+        analytics.endLevel(currentLevelId, false, timeTaken, 0);
+        analytics.submitReport();
+        console.log('[Analytics] Session ended (time\'s up)');
     }
 
     // --- GRID & CLUE RENDERING ---
@@ -260,7 +297,36 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- PUZZLE CHECKING & SUBMISSION ---
 
     function checkCompletion() {
-        if ([...document.querySelectorAll('.cell-input')].every(input => input.value.trim() !== '')) {
+        checkAttempts++;
+        const inputs = [...document.querySelectorAll('.cell-input')];
+        const filled = inputs.filter(input => input.value.trim() !== '').length;
+        const total = inputs.length;
+        const completionPercent = ((filled / total) * 100).toFixed(1);
+        
+        // ============================================
+        // ANALYTICS: Track Check Attempt
+        // ============================================
+        console.log('[Analytics] Check attempt #' + checkAttempts, {
+            filled: filled,
+            total: total,
+            completion: completionPercent + '%'
+        });
+        
+        analytics.recordTask(
+            currentLevelId,
+            'check_attempt_' + checkAttempts,
+            `Check Attempt #${checkAttempts}`,
+            'all_filled',
+            filled === total ? 'all_filled' : 'incomplete',
+            Date.now() - levelStartTime,
+            0
+        );
+        
+        analytics.addRawMetric('check_attempts', checkAttempts);
+        analytics.addRawMetric('completion_percent', completionPercent);
+        analytics.addRawMetric('filled_cells', filled);
+        
+        if (filled === total) {
             checkButton.classList.add('hidden');
             submitButton.classList.remove('hidden');
         } else {
@@ -269,19 +335,55 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function submitPuzzle() {
+        submitAttempts++;
         const inputs = document.querySelectorAll('.cell-input');
         let allCorrect = true;
+        let correctCount = 0;
+        let incorrectCount = 0;
         
         inputs.forEach(input => {
             const enteredValue = input.value.toUpperCase();
             const correctValue = input.dataset.answer;
             if (enteredValue === correctValue) {
                 input.classList.add('correct');
+                correctCount++;
             } else {
                 allCorrect = false;
+                incorrectCount++;
                 input.classList.add('incorrect-flash');
             }
         });
+        
+        const accuracy = ((correctCount / inputs.length) * 100).toFixed(1);
+        const timeTakenMs = Date.now() - levelStartTime;
+        const timeTakenSeconds = (GAME_DURATION - timeRemaining);
+
+        // ============================================
+        // ANALYTICS: Track Submit Attempt
+        // ============================================
+        console.log('[Analytics] Submit attempt #' + submitAttempts, {
+            correct: correctCount,
+            incorrect: incorrectCount,
+            accuracy: accuracy + '%',
+            allCorrect: allCorrect
+        });
+        
+        analytics.recordTask(
+            currentLevelId,
+            'submit_attempt_' + submitAttempts,
+            `Submit Attempt #${submitAttempts}`,
+            'all_correct',
+            allCorrect ? 'all_correct' : 'has_errors',
+            timeTakenMs,
+            allCorrect ? 50 : 10
+        );
+        
+        analytics.addRawMetric('submit_attempts', submitAttempts);
+        analytics.addRawMetric('accuracy_percent', accuracy);
+        analytics.addRawMetric('correct_cells', correctCount);
+        analytics.addRawMetric('incorrect_cells', incorrectCount);
+        
+        console.log('[Analytics] Metrics tracked:', analytics.getReportData().rawData);
 
         if (allCorrect) {
             clearInterval(timerInterval);
@@ -294,6 +396,26 @@ document.addEventListener('DOMContentLoaded', () => {
             } else if (timeTaken <= 480) { // less than 8 mins (i.e., more than 2 mins remaining)
                 finalScore = 100;
             }
+            
+            // ============================================
+            // ANALYTICS: Track Successful Completion
+            // ============================================
+            console.log('[Analytics] Puzzle completed!', {
+                timeTaken: (timeTakenMs / 1000).toFixed(2) + 's',
+                timeRemaining: timeRemaining + 's',
+                finalScore: finalScore,
+                checkAttempts: checkAttempts,
+                submitAttempts: submitAttempts
+            });
+            
+            analytics.addRawMetric('end_reason', 'completed');
+            analytics.addRawMetric('time_remaining', timeRemaining);
+            analytics.addRawMetric('final_score', finalScore);
+            analytics.endLevel(currentLevelId, true, timeTakenMs, finalScore);
+            
+            console.log('[Analytics] Full Report:', analytics.getReportData());
+            analytics.submitReport();
+            
             scoreDisplayElement.textContent = finalScore;
             inputs.forEach(input => input.readOnly = true);
             successOverlay.classList.remove('hidden');
@@ -315,6 +437,22 @@ document.addEventListener('DOMContentLoaded', () => {
     restartButton.addEventListener('click', () => location.reload());
     homeButton.addEventListener('click', () => { window.location.href = 'index.html'; });
     incompleteOkButton.addEventListener('click', () => incompleteOverlay.classList.add('hidden'));
+    
+    // ============================================
+    // ANALYTICS: Track Incomplete Sessions
+    // ============================================
+    window.addEventListener('beforeunload', () => {
+        if (currentLevelId && levelStartTime > 0) {
+            const level = analytics._getLevelById(currentLevelId);
+            if (level && !level.successful) {
+                const timeTaken = Date.now() - levelStartTime;
+                analytics.addRawMetric('end_reason', 'abandoned');
+                analytics.endLevel(currentLevelId, false, timeTaken, 0);
+                analytics.submitReport();
+                console.log('[Analytics] Session ended (incomplete)');
+            }
+        }
+    });
     
     // Start Game
     startGame();
